@@ -1,6 +1,14 @@
 import os
 import sys
 import shutil
+import platform
+
+# Multi-GPU configuration for Windows
+IS_WINDOWS = platform.system() == "Windows"
+if IS_WINDOWS:
+    # Windows requires Gloo backend (NCCL not available)
+    os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
+    os.environ["TORCH_DISTRIBUTED_BACKEND"] = "gloo"
 
 environ_dict = {"NCCL_P2P_DISABLE": "1",
                 "NCCL_IB_DISABLE": "1",
@@ -42,6 +50,32 @@ def get_device():
     elif torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def log_gpu_info():
+    """Log GPU information for multi-GPU setups"""
+    if not torch.cuda.is_available():
+        print("CUDA not available - running on CPU or MPS")
+        return
+
+    num_gpus = torch.cuda.device_count()
+    print(f"\n{'='*60}")
+    print(f"GPU Configuration:")
+    print(f"  CUDA available: {torch.cuda.is_available()}")
+    print(f"  Number of GPUs: {num_gpus}")
+    print(f"  Current device: {torch.cuda.current_device()}")
+
+    for i in range(num_gpus):
+        props = torch.cuda.get_device_properties(i)
+        print(f"\n  GPU {i}: {torch.cuda.get_device_name(i)}")
+        print(f"    Total memory: {props.total_memory / 1024**3:.2f} GB")
+        print(f"    Compute capability: {props.major}.{props.minor}")
+
+    if IS_WINDOWS and num_gpus > 1:
+        print(f"\n  Multi-GPU on Windows: Using Gloo backend (NCCL not available)")
+        print(f"  Expected speedup: ~1.6-1.8x with {num_gpus} GPUs")
+
+    print(f"{'='*60}\n")
 
 
 def get_nltk():
@@ -367,6 +401,9 @@ def parse_args(arg_list=None):
 
 
 def train(args):
+    # Log GPU configuration first
+    log_gpu_info()
+
     get_nltk()
     rouge = evaluate.load("rouge")
     meteor = evaluate.load("meteor")
@@ -474,13 +511,34 @@ def train(args):
     print("Datasets combined and shuffled", ds)
     os.makedirs(args.checkpoints_dir, exist_ok=True)
 
+    # Detect multi-GPU setup
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    is_multi_gpu = num_gpus > 1
+
+    # Optimize batch sizes for available hardware
+    if is_multi_gpu:
+        # Multi-GPU (e.g., 2xRTX4090): Use larger per-device batch with less accumulation
+        per_device_batch = 16  # 16 per GPU = 32 total per step
+        gradient_accumulation = 2  # Effective batch = 32 * 2 = 64
+        num_workers = 4  # Per GPU
+    elif torch.cuda.is_available():
+        # Single GPU: Smaller batch with more accumulation
+        per_device_batch = 8  # RTX 4090 can handle this
+        gradient_accumulation = 8  # Effective batch = 64
+        num_workers = 4
+    else:
+        # MPS or CPU: Conservative settings
+        per_device_batch = 4
+        gradient_accumulation = 16  # Effective batch = 64
+        num_workers = 2 if IS_WINDOWS else 4
+
     # Training arguments optimized for LoRA + prefix conditioning
     training_args = TrainingArguments(
         output_dir=args.checkpoints_dir,
         num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=4,  # Small batch for MPS memory limits
-        per_device_eval_batch_size=4,
-        gradient_accumulation_steps=16,  # Simulate batch size 64
+        per_device_train_batch_size=per_device_batch,
+        per_device_eval_batch_size=per_device_batch,
+        gradient_accumulation_steps=gradient_accumulation,
         learning_rate=args.lora_lr,  # Base LR for LoRA parameters
         weight_decay=0.01,  # As specified
         adam_beta1=0.9,
@@ -498,12 +556,28 @@ def train(args):
         logging_dir=os.path.join(args.checkpoints_dir, "logs"),
         logging_steps=10,
         report_to="none",  # Disable wandb for now
-        fp16=False,  # Mixed precision - enable if GPU supports it
+        fp16=torch.cuda.is_available(),  # Enable fp16 on CUDA (RTX 4090 supports it)
         bf16=False,
         gradient_checkpointing=False,  # Disabled for custom model (enabled directly on language_model)
-        dataloader_num_workers=4,
+        dataloader_num_workers=num_workers,
+        dataloader_pin_memory=torch.cuda.is_available(),  # Pin memory for CUDA
         remove_unused_columns=False,  # Important: keep pixel_values
+        # Multi-GPU specific settings
+        ddp_backend="gloo" if (IS_WINDOWS and is_multi_gpu) else None,
+        ddp_find_unused_parameters=False,  # Faster training, safe for our model
+        local_rank=-1,  # Auto-detect in distributed setup
     )
+
+    print(f"\nTraining configuration:")
+    print(f"  Per-device batch size: {per_device_batch}")
+    print(f"  Gradient accumulation: {gradient_accumulation}")
+    print(f"  Effective batch size: {per_device_batch * gradient_accumulation * num_gpus}")
+    print(f"  Dataloader workers: {num_workers}")
+    print(f"  FP16: {training_args.fp16}")
+    if is_multi_gpu:
+        print(f"  Multi-GPU: {num_gpus} GPUs")
+        print(f"  DDP backend: {training_args.ddp_backend or 'nccl'}")
+    print()
 
     # Create optimizer with different learning rates for projection vs LoRA
     # Projection head gets higher LR, LoRA gets lower LR
