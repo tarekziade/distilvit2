@@ -5,8 +5,8 @@ bitsandbytes
 accelerate
 pandas
 datasets
-transformers[torch]==4.33.2
-accelerate==0.28.0
+transformers[torch]>=4.40.0
+accelerate>=0.28.0
 numpy<2.0
 evaluate
 scikit-learn
@@ -21,8 +21,9 @@ codecarbon
 setuptools
 wandb
 mysql-connector-python
+peft>=0.7.0  # For LoRA and parameter-efficient fine-tuning
 
 # for the converter
 onnxruntime==1.15.1
-optimum==1.13.2
+optimum>=1.21.0,<2.0.0
 onnx==1.13.1
