@@ -12,6 +12,7 @@ evaluate
 scikit-learn
 tqdm
 huggingface-hub
+hf_xet  # For faster Xet Storage downloads from HuggingFace Hub
 Pillow
 nltk
 rouge
@@ -24,7 +25,7 @@ mysql-connector-python
 peft>=0.7.0  # For LoRA and parameter-efficient fine-tuning
 bert-score  # For dataset quality analysis
 
-# for the converter
-onnxruntime==1.15.1
+# for the converter (updated for Python 3.13 compatibility)
+onnxruntime>=1.20.0
 optimum>=1.21.0,<2.0.0
-onnx==1.13.1
+onnx>=1.16.0

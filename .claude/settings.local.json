@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -ExecutionPolicy Bypass -File ./run.ps1 train-quick)",
+      "Bash(powershell -ExecutionPolicy Bypass -File ./run.ps1:*)",
+      "Bash(dir:*)",
+      "Bash(make train-quick:*)",
+      "Bash(/c/Users/tarek/AppData/Local/Microsoft/WindowsApps/python -m venv venv)",
+      "Bash(cmd.exe /c \"where python.exe\")",
+      "Bash(python -m venv:*)",
+      "Bash(source venv/bin/activate)",
+      "Bash(pip install:*)",
+      "Bash(source venv/Scripts/activate)",
+      "Bash(train:*)",
+      "Bash(python:*)",
+      "Bash(pip uninstall:*)",
+      "Bash(torchrun:*)",
+      "Bash(accelerate launch:*)",
+      "Bash(TORCH_DISTRIBUTED_USE_LIBUV=0 torchrun:*)",
+      "Bash(CUDA_VISIBLE_DEVICES=0 train:*)",
+      "Bash(powershell -ExecutionPolicy Bypass -File ./train-multigpu.ps1)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git pull:*)"
+    ]
+  }
+}

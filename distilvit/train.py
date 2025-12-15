@@ -656,10 +656,34 @@ def train(args):
 
     # Detect multi-GPU setup
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    is_multi_gpu = num_gpus > 1
+    # Only enable multi-GPU mode if actually launched with distributed launcher
+    is_distributed_env = "RANK" in os.environ or "LOCAL_RANK" in os.environ
+    is_multi_gpu = num_gpus > 1 and is_distributed_env
+
+    # Use DataParallel for multi-GPU if not in distributed mode (Windows friendly)
+    use_dataparallel = num_gpus > 1 and not is_distributed_env
+    if use_dataparallel:
+        print(f"\n{'='*60}")
+        print(f"Using DataParallel with {num_gpus} GPUs")
+        print(f"Backend: DataParallel (Windows compatible)")
+        print(f"Expected speedup: ~{1.4 + (num_gpus - 2) * 0.1:.1f}x")
+        print(f"{'='*60}\n")
+        model = torch.nn.DataParallel(model)
+        # Add attributes expected by HuggingFace Trainer
+        if hasattr(model.module, '_keys_to_ignore_on_save'):
+            model._keys_to_ignore_on_save = model.module._keys_to_ignore_on_save
+        # For DataParallel, treat as single device for batch size calculation
+        effective_gpus = 1
+    else:
+        effective_gpus = num_gpus if is_multi_gpu else 1
 
     # Optimize batch sizes for available hardware
-    if is_multi_gpu:
+    if use_dataparallel:
+        # DataParallel: Batch is automatically split across GPUs
+        per_device_batch = 16  # Total batch split across GPUs
+        gradient_accumulation = 4  # Effective batch = 16 * 4 = 64
+        num_workers = 4
+    elif is_multi_gpu:
         # Multi-GPU (e.g., 2xRTX4090): Use larger per-device batch with less accumulation
         per_device_batch = 16  # 16 per GPU = 32 total per step
         gradient_accumulation = 2  # Effective batch = 32 * 2 = 64

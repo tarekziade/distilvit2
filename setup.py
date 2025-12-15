@@ -1,8 +1,8 @@
-import platform
+import sys
 from setuptools import setup, find_packages
 
-if platform.python_version_tuple()[:2] != ("3", "11"):
-    raise RuntimeError("Python version 3.11 required")
+if sys.version_info < (3, 11):
+    raise RuntimeError("Python version 3.11 or higher required")
 
 setup(
     name="distilvit",
