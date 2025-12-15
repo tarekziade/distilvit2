@@ -22,6 +22,7 @@ setuptools
 wandb
 mysql-connector-python
 peft>=0.7.0  # For LoRA and parameter-efficient fine-tuning
+bert-score  # For dataset quality analysis
 
 # for the converter
 onnxruntime==1.15.1

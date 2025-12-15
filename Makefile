@@ -1,7 +1,7 @@
 # Makefile for DistilVit Image Captioning Model
 # Requires Python 3.11
 
-.PHONY: help install clean train train-quick train-modern train-large train-legacy test quantize upload-hub lint check-python
+.PHONY: help install clean train train-quick train-modern train-large train-legacy test quality-report quality-report-quick quantize upload-hub lint check-python
 
 # Default target - show help
 .DEFAULT_GOAL := help
@@ -152,6 +152,17 @@ train-multi: ## Train on multiple datasets (Flickr + COCO)
 test: $(PYTHON_VENV) ## Run inference test comparing models
 	@echo "Running inference test..."
 	$(PYTHON_VENV) distilvit/infere.py
+
+quality-report: $(PYTHON_VENV) ## Generate dataset quality report (DATASET, SPLIT, MAX_SAMPLES, OUTPUT_DIR)
+	@echo "Generating dataset quality report..."
+	$(PYTHON_VENV) distilvit/dataset_quality_report.py \
+		--dataset $(or $(DATASET),Mozilla/flickr30k-transformed-captions-gpt4o) \
+		--split $(or $(SPLIT),test) \
+		$(if $(MAX_SAMPLES),--max-samples $(MAX_SAMPLES),) \
+		--output-dir $(or $(OUTPUT_DIR),./quality_reports)
+
+quality-report-quick: $(PYTHON_VENV) ## Quick quality report (100 samples)
+	$(MAKE) quality-report MAX_SAMPLES=100
 
 quantize: $(PYTHON_VENV) ## Quantize a trained model (requires MODEL_PATH)
 ifndef MODEL_PATH

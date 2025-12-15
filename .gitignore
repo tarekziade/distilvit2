@@ -171,6 +171,7 @@ cache/
 checkpoints/
 *.safetensors
 *.bin
+quality_reports/
 
 # Trained models (too large for git)
 siglip-*/
