@@ -98,4 +98,15 @@ Image → SigLIP (frozen) → Projection (trainable) → SmolLM + LoRA → Capti
 - **Memory Efficient**: Batch size 4 + gradient accumulation fits on consumer GPUs
 - **ONNX-Friendly**: Simpler architecture, easier deployment
 
-The architecture is fully pluggable with LoRA parameters. See CLAUDE.md for detailed documentation and model options.
+The architecture is fully pluggable with LoRA parameters. See [docs/architecture.md](docs/architecture.md) for detailed documentation and model options.
+
+## Documentation
+
+Comprehensive documentation is available in the `docs/` directory:
+
+- **[architecture.md](docs/architecture.md)**: Complete architecture documentation, model options, and design decisions
+- **[architecture-comparison.md](docs/architecture-comparison.md)**: Performance comparison between old and new architectures
+- **[multi-gpu-windows.md](docs/multi-gpu-windows.md)**: Guide for training on Windows 11 with multiple GPUs (2xRTX4090)
+- **[onnx-export-guide.md](docs/onnx-export-guide.md)**: Guide for merging LoRA weights and exporting to ONNX
+- **[transformers-js-compatibility.md](docs/transformers-js-compatibility.md)**: Browser deployment compatibility analysis
+- **[transformers-js-explained.md](docs/transformers-js-explained.md)**: Detailed explanation of transformers.js integration

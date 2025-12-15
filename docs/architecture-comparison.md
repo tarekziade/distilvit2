@@ -192,6 +192,6 @@ The migration represents a significant advancement in both training efficiency a
 - `requirements.txt` - Added peft>=0.7.0
 
 **Documentation**:
-- `CLAUDE.md` - Detailed architecture documentation
+- `docs/architecture.md` - Detailed architecture documentation
 - `README.md` - Quick start guide
-- `ARCHITECTURE_COMPARISON.md` - This file
+- `docs/architecture-comparison.md` - This file

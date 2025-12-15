@@ -261,7 +261,7 @@ info: ## Show detailed project information
 	@echo "  Default Decoder: SmolLM-135M (HuggingFaceTB/SmolLM-135M)"
 	@echo "  Total Parameters: ~221M"
 	@echo ""
-	@echo "Documentation: See CLAUDE.md for detailed information"
+	@echo "Documentation: See docs/architecture.md for detailed information"
 	@echo "Repository: Check README.md for project details"
 
 .PHONY: all
