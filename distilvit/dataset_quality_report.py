@@ -619,56 +619,212 @@ def analyze_dataset(args):
         plt.savefig(output_dir / "caption_length_hist.png", bbox_inches="tight")
         plt.close()
 
-    # 13) Print human-friendly summary + warnings
-    print("\n" + "=" * 60)
-    print("DATASET QUALITY SUMMARY")
-    print("=" * 60)
-    print(f"Dataset: {summary['dataset']}")
-    print(
-        f"Samples: {summary['total_samples']} ({summary['samples_with_images']} with images)"
-    )
-    print(
-        f"\nCLIP Score (image-text alignment): mean {summary['clip_score_mean']:.4f} ± {summary['clip_score_std']:.4f}"
-    )
+    # Helper functions for quality assessment
+    def assess_clip_score(score):
+        """Assess CLIP score quality (0-1 scale, higher is better)"""
+        if score >= 0.35:
+            return "✅ EXCELLENT", "Very strong image-text alignment"
+        elif score >= 0.30:
+            return "✅ GOOD", "Good image-text alignment"
+        elif score >= 0.25:
+            return "⚠️ FAIR", "Acceptable but could be improved"
+        elif score >= 0.20:
+            return "❌ POOR", "Weak image-text alignment"
+        else:
+            return "❌ VERY POOR", "Very weak alignment, major issues"
+
+    def assess_bert_score(score):
+        """Assess BERT score quality (0-1 scale, higher is better)"""
+        if score >= 0.90:
+            return "✅ EXCELLENT", "Very high fidelity to original"
+        elif score >= 0.85:
+            return "✅ GOOD", "Good fidelity to original"
+        elif score >= 0.80:
+            return "⚠️ FAIR", "Moderate changes from original"
+        elif score >= 0.70:
+            return "❌ POOR", "Significant deviation from original"
+        else:
+            return "❌ VERY POOR", "Major rewrite, low fidelity"
+
+    def assess_protected_rate(rate, category):
+        """Assess protected attribute mention rate"""
+        if category == "gender":
+            if rate <= 0.01:
+                return "✅ EXCELLENT", "Bias successfully eliminated"
+            elif rate <= 0.05:
+                return "✅ GOOD", "Very low bias"
+            elif rate <= 0.15:
+                return "⚠️ FAIR", "Some bias remains"
+            else:
+                return "❌ POOR", "High bias, needs improvement"
+        elif category == "race":
+            if rate <= 0.02:
+                return "✅ EXCELLENT", "Bias successfully eliminated"
+            elif rate <= 0.10:
+                return "✅ GOOD", "Low bias"
+            elif rate <= 0.20:
+                return "⚠️ FAIR", "Some bias remains"
+            else:
+                return "❌ POOR", "High bias, needs improvement"
+        else:  # age
+            # Age mentions (child, elderly) are more acceptable per guidelines
+            if rate <= 0.20:
+                return "✅ GOOD", "Acceptable age mentions"
+            elif rate <= 0.40:
+                return "⚠️ FAIR", "Moderate age mentions"
+            else:
+                return "❌ HIGH", "High age mentions"
+
+    def assess_duplicate_rate(rate):
+        """Assess duplicate rate"""
+        if rate <= 0.01:
+            return "✅ EXCELLENT", "Virtually no duplicates"
+        elif rate <= 0.05:
+            return "✅ GOOD", "Very low duplicates"
+        elif rate <= 0.10:
+            return "⚠️ FAIR", "Some duplicates"
+        else:
+            return "❌ HIGH", "High duplicate rate"
+
+    # 13) Print enhanced human-friendly summary
+    print("\n" + "=" * 80)
+    print("DATASET QUALITY REPORT".center(80))
+    print("=" * 80)
+
+    print(f"\n📊 Dataset: {summary['dataset']}")
+    print(f"📈 Samples: {summary['total_samples']} ({summary['samples_with_images']} with images)\n")
+
+    # CLIP Score Assessment
+    clip_rating, clip_desc = assess_clip_score(summary['clip_score_mean'])
+    print("─" * 80)
+    print("🖼️  IMAGE-TEXT ALIGNMENT (CLIP Score)")
+    print("─" * 80)
+    print(f"Score:       {summary['clip_score_mean']:.4f} ± {summary['clip_score_std']:.4f}")
+    print(f"Range:       [{summary['clip_score_min']:.4f}, {summary['clip_score_max']:.4f}]")
+    print(f"Median:      {summary['clip_score_median']:.4f}")
+    print(f"Assessment:  {clip_rating} - {clip_desc}")
+    print(f"Reference:   >0.35=Excellent, 0.30-0.35=Good, 0.25-0.30=Fair, <0.25=Poor")
+
+    # BERT Score Assessment
     if summary["bert_score_mean"] is not None:
-        print(
-            f"BERT Score (alt vs original): mean {summary['bert_score_mean']:.4f} ± {summary['bert_score_std']:.4f}"
-        )
+        bert_rating, bert_desc = assess_bert_score(summary['bert_score_mean'])
+        print("\n" + "─" * 80)
+        print("📝 CAPTION FIDELITY (BERT Score)")
+        print("─" * 80)
+        print(f"Score:       {summary['bert_score_mean']:.4f} ± {summary['bert_score_std']:.4f}")
+        print(f"Assessment:  {bert_rating} - {bert_desc}")
+        print(f"Reference:   >0.90=Excellent, 0.85-0.90=Good, 0.80-0.85=Fair, <0.80=Poor")
 
-    print(
-        f"\nCaption Statistics: avg words {summary['avg_word_count']:.1f}, median {summary['median_word_count']:.1f}, unique words {summary['unique_words']}"
-    )
-    print(f"Duplicate rate: {summary['duplicate_rate']*100:.2f}%")
-    print(
-        f"\nProtected Attributes: gender {summary['protected_gender_rate']*100:.2f}%, race {summary['protected_race_rate']*100:.2f}%, age {summary['protected_age_rate']*100:.2f}%"
-    )
+    # Caption Statistics
+    dup_rating, dup_desc = assess_duplicate_rate(summary['duplicate_rate'])
+    print("\n" + "─" * 80)
+    print("📊 CAPTION STATISTICS")
+    print("─" * 80)
+    print(f"Average length:    {summary['avg_word_count']:.1f} words")
+    print(f"Median length:     {summary['median_word_count']:.1f} words")
+    print(f"Vocabulary:        {summary['unique_words']} unique words")
+    print(f"Duplicates:        {summary['duplicate_rate']*100:.2f}% - {dup_rating} ({dup_desc})")
 
-    print("\nObject distribution (top 10):")
-    for ob, cnt in obj_counter.most_common(10):
-        print(f"  {ob}: {cnt}")
-    print(
-        f"\nObject-level imbalance metrics: entropy {summary['obj_entropy_bits']:.3f} bits, Gini {summary['obj_gini']:.3f}, top5_share {summary['obj_top5_share']:.3f}"
-    )
+    # Protected Attributes
+    gender_rating, gender_desc = assess_protected_rate(summary['protected_gender_rate'], "gender")
+    race_rating, race_desc = assess_protected_rate(summary['protected_race_rate'], "race")
+    age_rating, age_desc = assess_protected_rate(summary['protected_age_rate'], "age")
+
+    print("\n" + "─" * 80)
+    print("⚖️  BIAS DETECTION (Protected Attributes)")
+    print("─" * 80)
+    print(f"Gender mentions:   {summary['protected_gender_rate']*100:.2f}% - {gender_rating} ({gender_desc})")
+    print(f"Race mentions:     {summary['protected_race_rate']*100:.2f}% - {race_rating} ({race_desc})")
+    print(f"Age mentions:      {summary['protected_age_rate']*100:.2f}% - {age_rating} ({age_desc})")
+    print(f"Note: Lower is better for gender/race; age mentions (child/elderly) are acceptable")
+
+    # Object Distribution
+    print("\n" + "─" * 80)
+    print("🏷️  OBJECT DISTRIBUTION")
+    print("─" * 80)
+    print("Most common objects (top 10):")
+    for i, (ob, cnt) in enumerate(obj_counter.most_common(10), 1):
+        print(f"  {i:2}. {ob:20} {cnt:4} mentions")
+
+    print(f"\nDistribution metrics:")
+    print(f"  Unique objects:    {summary['obj_num_unique']}")
+    print(f"  Total mentions:    {summary['obj_total_mentions']}")
+    print(f"  Entropy:           {summary['obj_entropy_bits']:.3f} bits (higher = more diverse)")
+    print(f"  Gini coefficient:  {summary['obj_gini']:.3f} (0=equal, 1=unequal)")
+    print(f"  Top-5 share:       {summary['obj_top5_share']*100:.1f}%")
+    print(f"  Top-10 share:      {summary['obj_top10_share']*100:.1f}%")
+    print(f"  Rare classes:      {summary['obj_rare_count']} (count < {rare_threshold})")
 
     if imbalance_warnings:
-        print("\n!!! IMBALANCE WARNINGS:")
+        print("\n⚠️  IMBALANCE WARNINGS:")
         for w in imbalance_warnings:
-            print("   -", w)
+            print(f"   • {w}")
     else:
-        print("\nNo major imbalance warnings (Gini/top-k below thresholds).")
+        print("\n✅ No major imbalance warnings detected")
 
-    print(
-        f"\nNumber of rare classes (count < {rare_threshold}): {summary['obj_rare_count']}"
-    )
+    # Overall Quality Summary
+    print("\n" + "=" * 80)
+    print("OVERALL QUALITY SUMMARY".center(80))
+    print("=" * 80)
+
+    quality_checks = []
+
+    # Image-text alignment
+    if summary['clip_score_mean'] >= 0.30:
+        quality_checks.append("✅ Image-text alignment: GOOD")
+    elif summary['clip_score_mean'] >= 0.25:
+        quality_checks.append("⚠️ Image-text alignment: FAIR")
+    else:
+        quality_checks.append("❌ Image-text alignment: NEEDS IMPROVEMENT")
+
+    # Caption fidelity
+    if summary["bert_score_mean"] is not None:
+        if summary['bert_score_mean'] >= 0.85:
+            quality_checks.append("✅ Caption fidelity: GOOD")
+        elif summary['bert_score_mean'] >= 0.80:
+            quality_checks.append("⚠️ Caption fidelity: FAIR")
+        else:
+            quality_checks.append("❌ Caption fidelity: NEEDS IMPROVEMENT")
+
+    # Bias elimination
+    if summary['protected_gender_rate'] <= 0.05 and summary['protected_race_rate'] <= 0.10:
+        quality_checks.append("✅ Bias elimination: SUCCESSFUL")
+    elif summary['protected_gender_rate'] <= 0.15 and summary['protected_race_rate'] <= 0.20:
+        quality_checks.append("⚠️ Bias elimination: PARTIAL")
+    else:
+        quality_checks.append("❌ Bias elimination: NEEDS IMPROVEMENT")
+
+    # Duplicates
+    if summary['duplicate_rate'] <= 0.05:
+        quality_checks.append("✅ Duplicate rate: LOW")
+    elif summary['duplicate_rate'] <= 0.10:
+        quality_checks.append("⚠️ Duplicate rate: MODERATE")
+    else:
+        quality_checks.append("❌ Duplicate rate: HIGH")
+
+    for check in quality_checks:
+        print(check)
+
+    # Output files
+    print("\n" + "─" * 80)
+    print("📁 OUTPUT FILES")
+    print("─" * 80)
+    print(f"Directory: {output_dir}/")
+    print("  • per_example_scores.csv       - Detailed scores for each sample")
+    print("  • ranked_by_combined.csv       - Samples ranked by quality")
+    print("  • object_counts.csv            - Object frequency distribution")
+    print("  • reweighting_probs.csv        - Sampling probabilities")
+    print(f"  • objects_below_{rare_threshold}.csv       - Rare/underrepresented objects")
+    print("  • quality_summary.json         - All metrics in JSON format")
+    print(f"  • top_failures/                - Top {min(args.topk, len(df_sorted))} failure examples with images")
+
     if args.plot:
-        print(
-            "Saved plots: lorenz_curve.png, object_freq_loglog.png, caption_length_hist.png"
-        )
+        print("\n📊 PLOTS:")
+        print("  • lorenz_curve.png             - Distribution inequality curve")
+        print("  • object_freq_loglog.png       - Object frequency (log-log)")
+        print("  • caption_length_hist.png      - Caption length histogram")
 
-    print(
-        f"\nSaved files in {output_dir}: per_example_scores.csv, ranked_by_combined.csv, object_counts.csv, reweighting_probs.csv, objects_below_{rare_threshold}.csv, quality_summary.json"
-    )
-    print("=" * 60)
+    print("\n" + "=" * 80)
 
     return df, summary
 
