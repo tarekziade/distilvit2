@@ -43,6 +43,9 @@ from distilvit.prefix_model import PrefixConditioningVLM, PrefixConditioningConf
 # from distilvit.quantize import main as quantize
 from distilvit.upload import push_to_hub
 
+# CLIP loss support
+from transformers import CLIPProcessor, CLIPModel
+
 
 def get_device():
     if torch.cuda.is_available():
@@ -215,6 +218,132 @@ def data_collator(tokenizer, max_length, features):
     return batch
 
 
+class CLIPLossTrainer(Trainer):
+    """
+    Custom Trainer that adds CLIP loss to align generated captions with images.
+
+    CLIP loss helps the model learn to generate captions that better describe
+    the visual content, reducing hallucinations and improving image-text alignment.
+    """
+
+    def __init__(self, clip_model_name=None, clip_loss_weight=0.0, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.clip_loss_weight = clip_loss_weight
+        self.clip_model = None
+        self.clip_processor = None
+
+        # Only load CLIP if weight > 0
+        if self.clip_loss_weight > 0:
+            print(f"Loading CLIP model for loss computation: {clip_model_name}")
+            print(f"CLIP loss weight: {clip_loss_weight}")
+
+            device = self.args.device if hasattr(self.args, 'device') else get_device()
+            self.clip_model = CLIPModel.from_pretrained(clip_model_name).to(device)
+            self.clip_model.eval()  # Always in eval mode
+
+            # Try fast processor, fallback to slow
+            try:
+                self.clip_processor = CLIPProcessor.from_pretrained(clip_model_name, use_fast=True)
+            except (ImportError, OSError):
+                self.clip_processor = CLIPProcessor.from_pretrained(clip_model_name, use_fast=False)
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        Compute combined loss: Cross-Entropy + CLIP alignment loss
+
+        Loss = CE_loss + λ * CLIP_loss
+        where CLIP_loss = (1 - CLIP_similarity)
+        """
+        # Standard forward pass - computes cross-entropy loss
+        outputs = model(**inputs)
+        ce_loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+
+        # If CLIP loss is disabled, return standard loss
+        if self.clip_loss_weight == 0 or self.clip_model is None:
+            return (ce_loss, outputs) if return_outputs else ce_loss
+
+        # Generate captions for CLIP scoring
+        with torch.no_grad():
+            # Greedy generation (fast, deterministic)
+            generated_ids = model.generate(
+                pixel_values=inputs["pixel_values"],
+                max_length=inputs["labels"].shape[1],
+                num_beams=1,  # Greedy
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+
+            # Decode generated captions
+            generated_texts = self.tokenizer.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True
+            )
+
+        # Compute CLIP similarity
+        try:
+            # Process images and texts through CLIP
+            clip_inputs = self.clip_processor(
+                text=generated_texts,
+                images=[self.denormalize_image(img) for img in inputs["pixel_values"]],
+                return_tensors="pt",
+                padding=True
+            ).to(self.args.device if hasattr(self.args, 'device') else get_device())
+
+            # Get CLIP features
+            with torch.no_grad():
+                img_feats = self.clip_model.get_image_features(
+                    pixel_values=clip_inputs["pixel_values"]
+                )
+                txt_feats = self.clip_model.get_text_features(
+                    input_ids=clip_inputs["input_ids"],
+                    attention_mask=clip_inputs["attention_mask"]
+                )
+
+                # Normalize and compute similarity
+                img_feats = img_feats / img_feats.norm(p=2, dim=-1, keepdim=True)
+                txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
+                clip_similarity = (img_feats * txt_feats).sum(-1).mean()
+
+            # CLIP loss: encourage high similarity (minimize 1 - similarity)
+            clip_loss = 1.0 - clip_similarity
+
+            # Combined loss
+            total_loss = ce_loss + self.clip_loss_weight * clip_loss
+
+            # Log CLIP metrics (optional, for debugging)
+            if self.state.global_step % 100 == 0:
+                print(f"Step {self.state.global_step}: "
+                      f"CE Loss: {ce_loss.item():.4f}, "
+                      f"CLIP Sim: {clip_similarity.item():.4f}, "
+                      f"CLIP Loss: {clip_loss.item():.4f}, "
+                      f"Total: {total_loss.item():.4f}")
+
+            return (total_loss, outputs) if return_outputs else total_loss
+
+        except Exception as e:
+            # If CLIP computation fails, fall back to CE loss only
+            print(f"Warning: CLIP loss computation failed: {e}")
+            return (ce_loss, outputs) if return_outputs else ce_loss
+
+    def denormalize_image(self, img_tensor):
+        """Convert normalized image tensor to PIL Image for CLIP processor"""
+        from PIL import Image
+
+        # img_tensor shape: [3, H, W], normalized
+        # Denormalize (assuming ImageNet normalization from SigLIP)
+        mean = torch.tensor([0.5, 0.5, 0.5]).view(-1, 1, 1).to(img_tensor.device)
+        std = torch.tensor([0.5, 0.5, 0.5]).view(-1, 1, 1).to(img_tensor.device)
+
+        img = img_tensor * std + mean
+        img = img.clamp(0, 1)
+
+        # Convert to PIL
+        img = img.cpu().permute(1, 2, 0).numpy()
+        img = (img * 255).astype(np.uint8)
+        return Image.fromarray(img)
+
+
 def get_arg_parser(root_dir=None):
     if root_dir is None:
         root_dir = os.path.join(os.path.dirname(__file__), "..")
@@ -334,6 +463,20 @@ def get_arg_parser(root_dir=None):
         default="HuggingFaceTB/SmolLM-135M",
         type=str,
         help="Model for the decoder (default: SmolLM-135M). With prefix-conditioning + LoRA, any decoder-only LM works (SmolLM, GPT2, OPT, Llama-based models).",
+    )
+
+    # CLIP loss arguments
+    parser.add_argument(
+        "--clip-model",
+        default="openai/clip-vit-base-patch32",
+        type=str,
+        help="CLIP model for alignment loss (default: openai/clip-vit-base-patch32). Use openai/clip-vit-large-patch14-336 for better quality.",
+    )
+    parser.add_argument(
+        "--clip-loss-weight",
+        default=0.0,
+        type=float,
+        help="Weight for CLIP alignment loss (default: 0.0 = disabled). Recommended: 0.1-0.3. Higher values prioritize image-text alignment.",
     )
 
     # LoRA and freezing configuration
@@ -606,7 +749,9 @@ def train(args):
         os.path.join(args.checkpoints_dir, "metrics.txt")
     )
 
-    trainer = Trainer(
+    trainer = CLIPLossTrainer(
+        clip_model_name=args.clip_model,
+        clip_loss_weight=args.clip_loss_weight,
         model=model,
         args=training_args,
         train_dataset=ds["train"],

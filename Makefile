@@ -25,13 +25,16 @@ MAX_LENGTH ?= 30
 ENCODER ?= google/siglip-base-patch16-224
 DECODER ?= HuggingFaceTB/SmolLM-135M
 
+# Quality report defaults
+QUALITY_DATASET ?= Mozilla/flickr30k-transformed-captions-gpt4o
+
 help: ## Show this help message
 	@echo "DistilVit - Image Captioning Model Training"
 	@echo ""
 	@echo "Available targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Environment variables:"
+	@echo "Environment variables (Training):"
 	@echo "  DATASET     Dataset to train on (default: flickr)"
 	@echo "              Options: flickr, coco, docornot, pexels, validation, all"
 	@echo "  EPOCHS      Number of training epochs (default: 3)"
@@ -40,11 +43,18 @@ help: ## Show this help message
 	@echo "  ENCODER     Vision encoder model (default: google/siglip-base-patch16-224)"
 	@echo "  DECODER     Language decoder model (default: HuggingFaceTB/SmolLM-135M)"
 	@echo ""
+	@echo "Environment variables (Quality Reports):"
+	@echo "  QUALITY_DATASET  Dataset to analyze (default: Mozilla/flickr30k-transformed-captions-gpt4o)"
+	@echo "  SPLIT            Dataset split to analyze (default: test)"
+	@echo "  MAX_SAMPLES      Maximum samples to analyze (default: all)"
+	@echo "  OUTPUT_DIR       Output directory for reports (default: ./quality_reports)"
+	@echo ""
 	@echo "Examples:"
 	@echo "  make install                    # Set up environment"
 	@echo "  make train DATASET=flickr       # Train on Flickr dataset"
 	@echo "  make train-quick                # Quick test training"
-	@echo "  make train DATASET='flickr coco' EPOCHS=5  # Multi-dataset training"
+	@echo "  make quality-report-quick       # Quick quality analysis (100 samples)"
+	@echo "  make quality-report SPLIT=train MAX_SAMPLES=1000  # Custom quality analysis"
 
 check-python: ## Check Python version
 	@$(PYTHON) --version 2>/dev/null || (echo "Error: Python 3.11 not found. Please install Python 3.11" && exit 1)
@@ -153,10 +163,10 @@ test: $(PYTHON_VENV) ## Run inference test comparing models
 	@echo "Running inference test..."
 	$(PYTHON_VENV) distilvit/infere.py
 
-quality-report: $(PYTHON_VENV) ## Generate dataset quality report (DATASET, SPLIT, MAX_SAMPLES, OUTPUT_DIR)
+quality-report: $(PYTHON_VENV) ## Generate dataset quality report (QUALITY_DATASET, SPLIT, MAX_SAMPLES, OUTPUT_DIR)
 	@echo "Generating dataset quality report..."
 	$(PYTHON_VENV) distilvit/dataset_quality_report.py \
-		--dataset $(or $(DATASET),Mozilla/flickr30k-transformed-captions-gpt4o) \
+		--dataset $(QUALITY_DATASET) \
 		--split $(or $(SPLIT),test) \
 		$(if $(MAX_SAMPLES),--max-samples $(MAX_SAMPLES),) \
 		--output-dir $(or $(OUTPUT_DIR),./quality_reports)

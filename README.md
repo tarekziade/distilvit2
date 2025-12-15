@@ -57,6 +57,19 @@ bin/train --dataset flickr \
           --projection-lr 1e-3 --lora-lr 5e-5
 ```
 
+**Train with CLIP loss** (improves image-text alignment):
+```bash
+# Recommended: Use CLIP loss for better caption quality
+bin/train --dataset flickr \
+          --clip-loss-weight 0.1 \
+          --clip-model openai/clip-vit-base-patch32
+
+# High quality: Use larger CLIP model (slower but better)
+bin/train --dataset flickr \
+          --clip-loss-weight 0.2 \
+          --clip-model openai/clip-vit-large-patch14-336
+```
+
 **Train on all datasets** (requires 2TB disk space):
 ```bash
 make train-all
@@ -73,6 +86,23 @@ make test
 # Or manually:
 bin/python distilvit/infere.py
 ```
+
+## Dataset Quality Analysis
+
+Analyze dataset quality, measure bias, and validate caption transformations:
+
+```bash
+make quality-report-quick  # Quick analysis (100 samples)
+make quality-report        # Full dataset analysis
+```
+
+The quality report measures:
+- **Image-text alignment** (CLIP scores)
+- **Caption fidelity** (BERT scores)
+- **Bias detection** with original vs transformed comparison
+- **Object distribution** and imbalance metrics
+
+See [docs/dataset_quality.md](docs/dataset_quality.md) for complete documentation.
 
 ## Model Architecture
 
@@ -106,6 +136,8 @@ Comprehensive documentation is available in the `docs/` directory:
 
 - **[architecture.md](docs/architecture.md)**: Complete architecture documentation, model options, and design decisions
 - **[architecture-comparison.md](docs/architecture-comparison.md)**: Performance comparison between old and new architectures
+- **[dataset_quality.md](docs/dataset_quality.md)**: Dataset quality analysis, bias detection, and validation metrics
+- **[fighting_bias.md](docs/fighting_bias.md)**: Bias mitigation strategy and caption transformation guidelines
 - **[multi-gpu-windows.md](docs/multi-gpu-windows.md)**: Guide for training on Windows 11 with multiple GPUs (2xRTX4090)
 - **[onnx-export-guide.md](docs/onnx-export-guide.md)**: Guide for merging LoRA weights and exporting to ONNX
 - **[transformers-js-compatibility.md](docs/transformers-js-compatibility.md)**: Browser deployment compatibility analysis

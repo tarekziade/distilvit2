@@ -20,6 +20,7 @@ import re
 import json
 import math
 import argparse
+import warnings
 from pathlib import Path
 from collections import Counter, defaultdict
 from tqdm.auto import tqdm
@@ -30,8 +31,99 @@ import torch
 from datasets import load_dataset
 from PIL import Image
 from transformers import CLIPProcessor, CLIPModel
+from transformers import logging as transformers_logging
 from bert_score import score as bert_score
 import matplotlib.pyplot as plt
+
+# Suppress transformers warnings about model initialization
+transformers_logging.set_verbosity_error()
+
+
+# ------------------------
+# Auto batch size detection
+# ------------------------
+def get_optimal_batch_size(device, clip_model="openai/clip-vit-base-patch32"):
+    """
+    Automatically detect optimal batch size based on available device memory and model size.
+
+    Returns: (batch_size, memory_info_str)
+    """
+    # Larger models need smaller batch sizes
+    is_large_model = "large" in clip_model.lower() or "336" in clip_model
+
+    if device == "cuda":
+        try:
+            props = torch.cuda.get_device_properties(0)
+            total_memory_gb = props.total_memory / (1024**3)
+
+            # Conservative batch size based on VRAM and model size
+            # ViT-B/32: ~2-3GB for batch_size=32
+            # ViT-L/14@336: ~6-8GB for batch_size=32
+            if is_large_model:
+                # Larger models (ViT-L) need more memory
+                if total_memory_gb >= 24:  # RTX 4090, A100, etc.
+                    return 48, f"{total_memory_gb:.1f}GB CUDA VRAM (large model)"
+                elif total_memory_gb >= 16:  # RTX 4080, 3090, etc.
+                    return 32, f"{total_memory_gb:.1f}GB CUDA VRAM (large model)"
+                elif total_memory_gb >= 12:  # RTX 4070 Ti, 3080, etc.
+                    return 24, f"{total_memory_gb:.1f}GB CUDA VRAM (large model)"
+                elif total_memory_gb >= 8:   # RTX 3070, 4060 Ti, etc.
+                    return 16, f"{total_memory_gb:.1f}GB CUDA VRAM (large model)"
+                else:                        # <8GB
+                    return 8, f"{total_memory_gb:.1f}GB CUDA VRAM (large model)"
+            else:
+                # Base models (ViT-B)
+                if total_memory_gb >= 24:  # RTX 4090, A100, etc.
+                    return 128, f"{total_memory_gb:.1f}GB CUDA VRAM"
+                elif total_memory_gb >= 16:  # RTX 4080, 3090, etc.
+                    return 96, f"{total_memory_gb:.1f}GB CUDA VRAM"
+                elif total_memory_gb >= 12:  # RTX 4070 Ti, 3080, etc.
+                    return 64, f"{total_memory_gb:.1f}GB CUDA VRAM"
+                elif total_memory_gb >= 8:   # RTX 3070, 4060 Ti, etc.
+                    return 48, f"{total_memory_gb:.1f}GB CUDA VRAM"
+                else:                        # <8GB
+                    return 32, f"{total_memory_gb:.1f}GB CUDA VRAM"
+        except Exception:
+            return 32, "CUDA (unknown VRAM)"
+
+    elif device == "mps":
+        # Apple Silicon - unified memory, typically 16GB+
+        # MPS is generally efficient but conservative batch size
+        try:
+            # Try to estimate available memory on macOS
+            import subprocess
+            result = subprocess.run(
+                ['sysctl', 'hw.memsize'],
+                capture_output=True,
+                text=True,
+                timeout=1
+            )
+            if result.returncode == 0:
+                total_memory_bytes = int(result.stdout.split(':')[1].strip())
+                total_memory_gb = total_memory_bytes / (1024**3)
+
+                if is_large_model:
+                    # Larger models need smaller batches
+                    if total_memory_gb >= 64:    # Mac Studio, M2 Ultra
+                        return 32, f"{total_memory_gb:.0f}GB unified memory (large model)"
+                    elif total_memory_gb >= 32:  # MacBook Pro M1/M2 Max
+                        return 24, f"{total_memory_gb:.0f}GB unified memory (large model)"
+                    else:                        # MacBook Air, M1/M2 base
+                        return 16, f"{total_memory_gb:.0f}GB unified memory (large model)"
+                else:
+                    if total_memory_gb >= 64:    # Mac Studio, M2 Ultra
+                        return 96, f"{total_memory_gb:.0f}GB unified memory"
+                    elif total_memory_gb >= 32:  # MacBook Pro M1/M2 Max
+                        return 64, f"{total_memory_gb:.0f}GB unified memory"
+                    else:                        # MacBook Air, M1/M2 base
+                        return 48, f"{total_memory_gb:.0f}GB unified memory"
+        except Exception:
+            pass
+
+        return 32 if is_large_model else 48, "Apple Silicon (MPS)"
+
+    else:  # CPU
+        return 8 if is_large_model else 16, "CPU (slower, use small batches)"
 
 
 # ------------------------
@@ -106,7 +198,11 @@ class CLIPScorer:
     def __init__(self, model_name="openai/clip-vit-base-patch32", device=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = CLIPModel.from_pretrained(model_name).to(self.device)
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        # Try to use fast processor, fall back to slow if torchvision not available
+        try:
+            self.processor = CLIPProcessor.from_pretrained(model_name, use_fast=True)
+        except (ImportError, OSError):
+            self.processor = CLIPProcessor.from_pretrained(model_name, use_fast=False)
         self.model.eval()
 
     @torch.no_grad()
@@ -114,7 +210,8 @@ class CLIPScorer:
         """Compute CLIP similarity between images and texts"""
         sims = []
         n = len(texts)
-        for i in range(0, n, batch_size):
+        num_batches = (n + batch_size - 1) // batch_size
+        for i in tqdm(range(0, n, batch_size), total=num_batches, desc="CLIP scoring"):
             batch_imgs = images[i : i + batch_size]
             batch_texts = texts[i : i + batch_size]
             proc_imgs = [
@@ -184,57 +281,115 @@ def lorenz_curve(counter):
 # ------------------------
 # Protected attributes
 # ------------------------
+# Expanded protected-attribute vocab (safe, non-exhaustive seed)
+# NOTE: This intentionally avoids slurs. If you need slur detection, treat with strict human-review.
 PROTECTED_TERMS = {
     "gender": [
-        "man",
-        "men",
-        "woman",
-        "women",
-        "male",
-        "female",
-        "boy",
-        "girl",
-        "guy",
-        "guys",
-        "lady",
-        "ladies",
-        "gentleman",
-        "gentlemen",
-        "he",
-        "she",
-        "his",
-        "her",
-        "him",
+        "man", "men", "woman", "women", "male", "female", "boy", "girl",
+        "guy", "guys", "gal", "lady", "ladies", "gentleman", "gentlemen",
+        "he", "she", "his", "her", "him", "hers", "herself", "himself",
+        "nonbinary", "non-binary", "nb", "agender", "genderqueer", "genderfluid",
+        "trans", "transgender", "trans man", "trans woman", "cis", "cisgender"
     ],
-    "race": [
-        "white",
-        "black",
-        "asian",
-        "hispanic",
-        "latino",
-        "latina",
-        "african",
-        "caucasian",
-        "chinese",
-        "indian",
-        "arab",
+    "sexual_orientation": [
+        "gay", "lesbian", "bisexual", "bi", "queer", "straight", "heterosexual",
+        "homosexual", "pansexual", "pan", "asexual", "ace"
+    ],
+    "race_ethnicity": [
+        # high-level categories & adjectives
+        "white", "black", "asian", "hispanic", "latino", "latina", "latinx",
+        "african", "african-american", "afro-american", "afro",
+        "caucasian", "middle eastern", "arab", "indigenous", "native", "indian",
+        # region-language groups
+        "east asian", "south asian", "southeast asian", "south east asian",
+        "pacific islander", "polynesian", "melanesian", "micronesian"
+    ],
+    "nationality": [
+        # seed examples; this list should be extended with pycountry (helper below)
+        "american", "british", "french", "german", "spanish", "italian", "russian",
+        "chinese", "japanese", "korean", "vietnamese", "filipino", "filipina",
+        "indian", "pakistani", "bangladeshi", "nigerian", "egyptian"
+    ],
+    "religion": [
+        "christian", "christianity", "muslim", "islam", "muslimah", "muslims",
+        "moslem", "jew", "jewish", "judaism", "hindu", "hinduism", "buddhist",
+        "buddhism", "sikh", "sikhism", "atheist", "agnostic", "catholic",
+        "protestant", "orthodox"
+    ],
+    "disability": [
+        "disabled", "disability", "wheelchair", "wheelchair-bound", "deaf", "hearing impaired",
+        "blind", "visually impaired", "visually-impaired", "low vision", "dyslexic",
+        "paraplegic", "quadriplegic", "neurodivergent", "autistic", "autism",
+        "intellectual disability", "learning disability", "mobility impaired"
     ],
     "age": [
-        "young",
-        "old",
-        "elderly",
-        "senior",
-        "youth",
-        "child",
-        "children",
-        "kid",
-        "kids",
-        "baby",
-        "toddler",
-        "teenager",
-        "teen",
-    ],
+        "baby", "infant", "toddler", "child", "children", "kid", "kids", "teen",
+        "teenager", "adolescent", "youth", "young", "adult", "middle-aged",
+        "elder", "elderly", "senior", "old", "grandparent", "pensioner"
+    ]
 }
+
+
+# --------------------------
+# Optional helper: extend nationalities using pycountry
+# --------------------------
+def extend_with_countries(protected_terms_dict, include_demonyms=True, include_official_names=False):
+    """
+    Extend 'nationality' and 'race_ethnicity' buckets with country names and demonyms.
+    Requires `pycountry` (pip install pycountry).
+    include_demonyms: try to add common demonyms where available (best-effort)
+    include_official_names: add full official country names (e.g. "United States of America")
+    Returns the updated dict (also modifies in-place).
+    """
+    try:
+        import pycountry
+    except Exception:
+        # pycountry not installed — return unchanged
+        return protected_terms_dict
+
+    nat_bucket = protected_terms_dict.get("nationality", [])
+    race_bucket = protected_terms_dict.get("race_ethnicity", [])
+
+    seen = set([w for w in nat_bucket + race_bucket])
+
+    for country in pycountry.countries:
+        name = country.name.lower()
+        if include_official_names and hasattr(country, "official_name"):
+            name = country.official_name.lower()
+        # add country name (e.g., 'france') and adjective (e.g., 'french') if determinable
+        if name not in seen:
+            nat_bucket.append(name)
+            seen.add(name)
+        # try to derive a demonym using common heuristics:
+        # (1) if country has a common name -> add simple adjective forms
+        common = country.name.split(",")[0].lower().strip()
+        # naive adjective heuristics
+        if common.endswith("ia"):
+            dem = common[:-2] + "ian"
+        elif common.endswith("land"):
+            dem = common + "er"
+        elif common.endswith("a"):
+            dem = common[:-1] + "an"
+        elif common.endswith("e"):
+            dem = common + "n"
+        else:
+            dem = common + "n"
+        dem = dem.replace(" ", "-")
+        if include_demonyms and dem not in seen:
+            nat_bucket.append(dem)
+            seen.add(dem)
+
+    # de-duplicate and write back
+    protected_terms_dict["nationality"] = sorted(set(nat_bucket))
+    protected_terms_dict["race_ethnicity"] = sorted(set(race_bucket))
+    return protected_terms_dict
+
+
+# Automatically extend with countries if pycountry is available
+try:
+    extend_with_countries(PROTECTED_TERMS, include_demonyms=True, include_official_names=False)
+except Exception:
+    pass
 
 
 def count_protected_mentions(text):
@@ -284,9 +439,17 @@ def analyze_dataset(args):
     total_rows = len(ds)
     print(f"Loaded {total_rows} samples")
 
+    # Auto-detect optimal batch size if not specified
+    if args.batch_size is None:
+        optimal_batch_size, memory_info = get_optimal_batch_size(args.device, args.clip_model)
+        args.batch_size = optimal_batch_size
+        print(f"Auto-detected batch size: {optimal_batch_size} ({memory_info})")
+    else:
+        print(f"Using specified batch size: {args.batch_size}")
+
     # Initialize CLIP scorer
-    print("Loading CLIP model...")
-    clip_scorer = CLIPScorer(device=args.device)
+    print(f"Loading CLIP model: {args.clip_model}...")
+    clip_scorer = CLIPScorer(model_name=args.clip_model, device=args.device)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -329,8 +492,14 @@ def analyze_dataset(args):
         words = normalize_text(alt_text).split()
         word_counter.update(words)
         length_dist.append(len(words))
-        protected = count_protected_mentions(alt_text)
-        for cat, c in protected.items():
+
+        # Protected attributes for transformed text
+        protected_transformed = count_protected_mentions(alt_text)
+
+        # Protected attributes for original text
+        protected_original = count_protected_mentions(original_text)
+
+        for cat, c in protected_transformed.items():
             protected_counts[cat].append(c)
 
         images.append(img)
@@ -346,12 +515,12 @@ def analyze_dataset(args):
                 "objects": objects_norm,
                 "word_count": len(words),
                 "has_image": img is not None,
-                **{f"protected_{k}": v for k, v in protected.items()},
+                **{f"protected_{k}_transformed": v for k, v in protected_transformed.items()},
+                **{f"protected_{k}_original": v for k, v in protected_original.items()},
             }
         )
 
     # 1) CLIP scores
-    print("Computing CLIP scores...")
     clip_scores = clip_scorer.image_text_sim(
         images, alt_texts, batch_size=args.batch_size
     )
@@ -359,13 +528,13 @@ def analyze_dataset(args):
         results[i]["clip_score"] = s
 
     # 2) BERTScore (alt vs original) in batches
-    print("Computing BERT scores...")
     valid_pairs = [(a, o) for a, o in zip(alt_texts, original_texts) if a and o]
     bert_map = {}
     if valid_pairs:
         alts, origs = zip(*valid_pairs)
+        print()  # Add newline for clean output
         P, R, F1 = bert_score(
-            list(alts), list(origs), lang="en", verbose=False, device=args.device
+            list(alts), list(origs), lang="en", verbose=True, device=args.device
         )
         bert_scores = F1.cpu().numpy().tolist()
         bert_idx = 0
@@ -480,9 +649,22 @@ def analyze_dataset(args):
         "unique_words": int(vocab_size),
         "total_words": int(sum(word_counter.values())),
         "vocabulary_entropy": float(entropy_from_counts(word_counter)),
-        "protected_gender_rate": float((df["protected_gender"] > 0).mean()),
-        "protected_race_rate": float((df["protected_race"] > 0).mean()),
-        "protected_age_rate": float((df["protected_age"] > 0).mean()),
+        # Protected attributes - transformed (current captions)
+        "protected_gender_rate_transformed": float((df["protected_gender_transformed"] > 0).mean()) if "protected_gender_transformed" in df else 0.0,
+        "protected_sexual_orientation_rate_transformed": float((df["protected_sexual_orientation_transformed"] > 0).mean()) if "protected_sexual_orientation_transformed" in df else 0.0,
+        "protected_race_ethnicity_rate_transformed": float((df["protected_race_ethnicity_transformed"] > 0).mean()) if "protected_race_ethnicity_transformed" in df else 0.0,
+        "protected_nationality_rate_transformed": float((df["protected_nationality_transformed"] > 0).mean()) if "protected_nationality_transformed" in df else 0.0,
+        "protected_religion_rate_transformed": float((df["protected_religion_transformed"] > 0).mean()) if "protected_religion_transformed" in df else 0.0,
+        "protected_disability_rate_transformed": float((df["protected_disability_transformed"] > 0).mean()) if "protected_disability_transformed" in df else 0.0,
+        "protected_age_rate_transformed": float((df["protected_age_transformed"] > 0).mean()) if "protected_age_transformed" in df else 0.0,
+        # Protected attributes - original (baseline captions)
+        "protected_gender_rate_original": float((df["protected_gender_original"] > 0).mean()) if "protected_gender_original" in df else 0.0,
+        "protected_sexual_orientation_rate_original": float((df["protected_sexual_orientation_original"] > 0).mean()) if "protected_sexual_orientation_original" in df else 0.0,
+        "protected_race_ethnicity_rate_original": float((df["protected_race_ethnicity_original"] > 0).mean()) if "protected_race_ethnicity_original" in df else 0.0,
+        "protected_nationality_rate_original": float((df["protected_nationality_original"] > 0).mean()) if "protected_nationality_original" in df else 0.0,
+        "protected_religion_rate_original": float((df["protected_religion_original"] > 0).mean()) if "protected_religion_original" in df else 0.0,
+        "protected_disability_rate_original": float((df["protected_disability_original"] > 0).mean()) if "protected_disability_original" in df else 0.0,
+        "protected_age_rate_original": float((df["protected_age_original"] > 0).mean()) if "protected_age_original" in df else 0.0,
         "avg_object_coverage": float(
             np.nanmean([v for v in df["obj_miss_frac"].dropna()])
         )
@@ -648,7 +830,8 @@ def analyze_dataset(args):
 
     def assess_protected_rate(rate, category):
         """Assess protected attribute mention rate"""
-        if category == "gender":
+        if category in ("gender", "sexual_orientation"):
+            # Very sensitive - should be eliminated
             if rate <= 0.01:
                 return "✅ EXCELLENT", "Bias successfully eliminated"
             elif rate <= 0.05:
@@ -657,7 +840,8 @@ def analyze_dataset(args):
                 return "⚠️ FAIR", "Some bias remains"
             else:
                 return "❌ POOR", "High bias, needs improvement"
-        elif category == "race":
+        elif category in ("race", "race_ethnicity", "nationality", "religion"):
+            # Should be minimized
             if rate <= 0.02:
                 return "✅ EXCELLENT", "Bias successfully eliminated"
             elif rate <= 0.10:
@@ -666,14 +850,24 @@ def analyze_dataset(args):
                 return "⚠️ FAIR", "Some bias remains"
             else:
                 return "❌ POOR", "High bias, needs improvement"
+        elif category == "disability":
+            # Context-dependent - may be necessary for accessibility descriptions
+            if rate <= 0.05:
+                return "✅ EXCELLENT", "Very low mentions"
+            elif rate <= 0.15:
+                return "✅ GOOD", "Low mentions"
+            elif rate <= 0.30:
+                return "⚠️ FAIR", "Moderate mentions"
+            else:
+                return "⚠️ ELEVATED", "High mentions (may be contextual)"
         else:  # age
             # Age mentions (child, elderly) are more acceptable per guidelines
             if rate <= 0.20:
-                return "✅ GOOD", "Acceptable age mentions"
+                return "✅ GOOD", "Acceptable mentions"
             elif rate <= 0.40:
-                return "⚠️ FAIR", "Moderate age mentions"
+                return "⚠️ FAIR", "Moderate mentions"
             else:
-                return "❌ HIGH", "High age mentions"
+                return "⚠️ ELEVATED", "High mentions"
 
     def assess_duplicate_rate(rate):
         """Assess duplicate rate"""
@@ -725,18 +919,48 @@ def analyze_dataset(args):
     print(f"Vocabulary:        {summary['unique_words']} unique words")
     print(f"Duplicates:        {summary['duplicate_rate']*100:.2f}% - {dup_rating} ({dup_desc})")
 
-    # Protected Attributes
-    gender_rating, gender_desc = assess_protected_rate(summary['protected_gender_rate'], "gender")
-    race_rating, race_desc = assess_protected_rate(summary['protected_race_rate'], "race")
-    age_rating, age_desc = assess_protected_rate(summary['protected_age_rate'], "age")
-
+    # Protected Attributes - compare original vs transformed
     print("\n" + "─" * 80)
-    print("⚖️  BIAS DETECTION (Protected Attributes)")
+    print("⚖️  BIAS DETECTION COMPARISON (Original → Transformed)")
     print("─" * 80)
-    print(f"Gender mentions:   {summary['protected_gender_rate']*100:.2f}% - {gender_rating} ({gender_desc})")
-    print(f"Race mentions:     {summary['protected_race_rate']*100:.2f}% - {race_rating} ({race_desc})")
-    print(f"Age mentions:      {summary['protected_age_rate']*100:.2f}% - {age_rating} ({age_desc})")
-    print(f"Note: Lower is better for gender/race; age mentions (child/elderly) are acceptable")
+    print(f"{'Category':25} {'Original':>10} {'Transformed':>12} {'Change':>10} {'Status':>25}")
+    print("─" * 80)
+
+    protected_comparisons = []
+    for category in ["gender", "sexual_orientation", "race_ethnicity", "nationality", "religion", "disability", "age"]:
+        rate_key_transformed = f"protected_{category}_rate_transformed"
+        rate_key_original = f"protected_{category}_rate_original"
+
+        if rate_key_transformed in summary and rate_key_original in summary:
+            rate_original = summary[rate_key_original]
+            rate_transformed = summary[rate_key_transformed]
+
+            # Calculate improvement
+            if rate_original > 0:
+                reduction_pct = ((rate_original - rate_transformed) / rate_original) * 100
+                improvement_str = f"-{reduction_pct:.1f}%"
+            else:
+                reduction_pct = 0
+                improvement_str = "N/A"
+
+            # Assess current (transformed) state
+            if category in ["gender", "race_ethnicity"]:
+                assess_cat = category.split("_")[0]
+            else:
+                assess_cat = category
+
+            rating, desc = assess_protected_rate(rate_transformed, assess_cat)
+
+            # Format category name for display
+            display_name = category.replace("_", " ").title()
+
+            # Print comparison row
+            print(f"{display_name:25} {rate_original*100:9.2f}% {rate_transformed*100:11.2f}% {improvement_str:>10} {rating:>25}")
+
+            protected_comparisons.append((category, rate_original, rate_transformed, reduction_pct, rating))
+
+    print("\nNote: Negative change indicates bias reduction (improvement)")
+    print("      Lower is generally better; age/disability mentions may be acceptable per context")
 
     # Object Distribution
     print("\n" + "─" * 80)
@@ -786,10 +1010,25 @@ def analyze_dataset(args):
         else:
             quality_checks.append("❌ Caption fidelity: NEEDS IMPROVEMENT")
 
-    # Bias elimination
-    if summary['protected_gender_rate'] <= 0.05 and summary['protected_race_rate'] <= 0.10:
+    # Bias elimination - check critical categories (using transformed rates)
+    critical_bias_low = (
+        summary.get('protected_gender_rate_transformed', 1.0) <= 0.05 and
+        summary.get('protected_sexual_orientation_rate_transformed', 1.0) <= 0.05 and
+        summary.get('protected_race_ethnicity_rate_transformed', 1.0) <= 0.10 and
+        summary.get('protected_nationality_rate_transformed', 1.0) <= 0.10 and
+        summary.get('protected_religion_rate_transformed', 1.0) <= 0.10
+    )
+    critical_bias_moderate = (
+        summary.get('protected_gender_rate_transformed', 1.0) <= 0.15 and
+        summary.get('protected_sexual_orientation_rate_transformed', 1.0) <= 0.15 and
+        summary.get('protected_race_ethnicity_rate_transformed', 1.0) <= 0.20 and
+        summary.get('protected_nationality_rate_transformed', 1.0) <= 0.20 and
+        summary.get('protected_religion_rate_transformed', 1.0) <= 0.20
+    )
+
+    if critical_bias_low:
         quality_checks.append("✅ Bias elimination: SUCCESSFUL")
-    elif summary['protected_gender_rate'] <= 0.15 and summary['protected_race_rate'] <= 0.20:
+    elif critical_bias_moderate:
         quality_checks.append("⚠️ Bias elimination: PARTIAL")
     else:
         quality_checks.append("❌ Bias elimination: NEEDS IMPROVEMENT")
@@ -862,7 +1101,13 @@ def main():
         help="Output directory for reports",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32, help="Batch size for CLIP scoring"
+        "--clip-model",
+        type=str,
+        default="openai/clip-vit-large-patch14-336",
+        help="CLIP model to use for scoring (default: openai/clip-vit-large-patch14-336)",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=None, help="Batch size for CLIP/BERT scoring (default: auto-detect based on device memory)"
     )
     parser.add_argument(
         "--device", type=str, default=None, help="Device to use (cuda/mps/cpu)"
