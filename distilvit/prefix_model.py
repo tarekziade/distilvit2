@@ -309,10 +309,12 @@ class PrefixConditioningVLM(PreTrainedModel):
         )
 
         # Generate with language model
+        # When using inputs_embeds, we must use max_new_tokens instead of max_length
+        # because the embeddings don't have corresponding token IDs in the output
         outputs = self.language_model.generate(
             inputs_embeds=vision_embeds,
             attention_mask=vision_attention_mask,
-            max_length=num_vision_tokens + max_length,
+            max_new_tokens=max_length,  # Generate max_length NEW tokens
             num_beams=num_beams,
             temperature=temperature,
             top_p=top_p,
@@ -322,10 +324,9 @@ class PrefixConditioningVLM(PreTrainedModel):
             **kwargs
         )
 
-        # Remove vision token positions from output
-        generated_ids = outputs[:, num_vision_tokens:]
-
-        return generated_ids
+        # When using inputs_embeds, the output only contains the generated token IDs
+        # (not the input embeddings), so we return the outputs directly
+        return outputs
 
     def print_trainable_parameters(self):
         """Print number of trainable parameters."""

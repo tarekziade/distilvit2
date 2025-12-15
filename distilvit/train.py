@@ -197,16 +197,27 @@ def data_collator(tokenizer, max_length, features):
         if isinstance(label, (torch.Tensor, np.ndarray)):
             label = label.tolist() if hasattr(label, 'tolist') else list(label)
 
+        # Store original length for padding mask
+        original_length = len(label)
+
         # Pad or truncate
         if len(label) > max_length:
             label = label[:max_length]
-        elif len(label) < max_length:
-            label = label + [tokenizer.pad_token_id] * (max_length - len(label))
+            original_length = max_length
+
+        # Create input_ids (for teacher forcing) and labels (for loss)
+        # input_ids: full sequence for embedding lookup
+        # labels: masked padding positions with -100 (ignored in loss)
+        input_id = label.copy()
+        if len(input_id) < max_length:
+            input_id = input_id + [tokenizer.pad_token_id] * (max_length - len(input_id))
+
+        # For labels, use -100 for padding positions (ignored in loss computation)
+        if len(label) < max_length:
+            label = label + [-100] * (max_length - len(label))
 
         labels.append(label)
-        # For causal LM training, input_ids are the same as labels
-        # The model will handle the shifting internally
-        input_ids.append(label)
+        input_ids.append(input_id)
 
     # Stack into batch tensors
     batch = {
@@ -247,7 +258,7 @@ class CLIPLossTrainer(Trainer):
             except (ImportError, OSError):
                 self.clip_processor = CLIPProcessor.from_pretrained(clip_model_name, use_fast=False)
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
         Compute combined loss: Cross-Entropy + CLIP alignment loss
 
@@ -264,13 +275,15 @@ class CLIPLossTrainer(Trainer):
 
         # Generate captions for CLIP scoring
         with torch.no_grad():
+            # Get actual model (unwrap DataParallel if needed)
+            actual_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+
             # Greedy generation (fast, deterministic)
-            generated_ids = model.generate(
+            # Note: pad_token_id and eos_token_id are handled by the model's generate method
+            generated_ids = actual_model.generate(
                 pixel_values=inputs["pixel_values"],
                 max_length=inputs["labels"].shape[1],
                 num_beams=1,  # Greedy
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
             )
 
             # Decode generated captions
@@ -325,6 +338,30 @@ class CLIPLossTrainer(Trainer):
             # If CLIP computation fails, fall back to CE loss only
             print(f"Warning: CLIP loss computation failed: {e}")
             return (ce_loss, outputs) if return_outputs else ce_loss
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """
+        Override prediction_step to ensure eval_loss is properly computed and returned.
+        """
+        has_labels = "labels" in inputs
+
+        # Forward pass with loss computation
+        with torch.no_grad():
+            if has_labels:
+                loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+                loss = loss.mean().detach()  # Ensure scalar loss
+            else:
+                outputs = model(**inputs)
+                loss = None
+
+        # Return tuple: (loss, logits, labels)
+        if prediction_loss_only:
+            return (loss, None, None)
+
+        logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+        labels = inputs.get("labels")
+
+        return (loss, logits, labels)
 
     def denormalize_image(self, img_tensor):
         """Convert normalized image tensor to PIL Image for CLIP processor"""
@@ -417,6 +454,20 @@ def get_arg_parser(root_dir=None):
     parser.add_argument("--save-steps", type=int, default=100, help="Save steps")
 
     parser.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=3,
+        help="Maximum number of checkpoints to keep (default: 3, older checkpoints are deleted)",
+    )
+
+    parser.add_argument(
+        "--delete-old-checkpoints",
+        default=False,
+        action="store_true",
+        help="Delete all existing checkpoints before training",
+    )
+
+    parser.add_argument(
         "--max-length",
         type=int,
         default=DEFAULT_MAX_LENGTH,
@@ -476,7 +527,7 @@ def get_arg_parser(root_dir=None):
         "--clip-loss-weight",
         default=0.0,
         type=float,
-        help="Weight for CLIP alignment loss (default: 0.0 = disabled). Recommended: 0.1-0.3. Higher values prioritize image-text alignment.",
+        help="Weight for CLIP alignment loss (default: 0.0 - disabled). Recommended: 0.05-0.15 if enabled. Higher values prioritize image-text alignment but slow training. CLIP loss can be unstable early in training.",
     )
 
     # LoRA and freezing configuration
@@ -520,14 +571,14 @@ def get_arg_parser(root_dir=None):
     parser.add_argument(
         "--projection-lr",
         type=float,
-        default=1e-3,
-        help="Learning rate for projection head (default: 1e-3)",
+        default=3e-4,
+        help="Learning rate for projection head (default: 3e-4). Reduced from 1e-3 for better stability.",
     )
     parser.add_argument(
         "--lora-lr",
         type=float,
-        default=5e-5,
-        help="Learning rate for LoRA parameters (default: 5e-5)",
+        default=1e-4,
+        help="Learning rate for LoRA parameters (default: 1e-4). Increased from 5e-5 for balanced learning.",
     )
 
     parser.add_argument(
@@ -546,6 +597,16 @@ def parse_args(arg_list=None):
 def train(args):
     # Log GPU configuration first
     log_gpu_info()
+
+    # Delete old checkpoints if requested
+    if args.delete_old_checkpoints:
+        if os.path.exists(args.checkpoints_dir):
+            import shutil
+            print(f"\n{'='*60}")
+            print(f"Deleting old checkpoints from {args.checkpoints_dir}")
+            print(f"{'='*60}\n")
+            shutil.rmtree(args.checkpoints_dir)
+            os.makedirs(args.checkpoints_dir, exist_ok=True)
 
     get_nltk()
     rouge = evaluate.load("rouge")
@@ -678,25 +739,27 @@ def train(args):
         effective_gpus = num_gpus if is_multi_gpu else 1
 
     # Optimize batch sizes for available hardware
+    # Reduced batch sizes for better gradient diversity and generalization
     if use_dataparallel:
         # DataParallel: Batch is automatically split across GPUs
+        # Balanced for 2x RTX 4090 (24GB each)
         per_device_batch = 16  # Total batch split across GPUs
-        gradient_accumulation = 4  # Effective batch = 16 * 4 = 64
+        gradient_accumulation = 4  # Effective batch = 64
         num_workers = 4
     elif is_multi_gpu:
-        # Multi-GPU (e.g., 2xRTX4090): Use larger per-device batch with less accumulation
-        per_device_batch = 16  # 16 per GPU = 32 total per step
-        gradient_accumulation = 2  # Effective batch = 32 * 2 = 64
+        # Multi-GPU (e.g., 2xRTX4090): Balanced per-device batch
+        per_device_batch = 8  # 8 per GPU = 16 total per step
+        gradient_accumulation = 4  # Effective batch = 64
         num_workers = 4  # Per GPU
     elif torch.cuda.is_available():
-        # Single GPU: Smaller batch with more accumulation
-        per_device_batch = 8  # RTX 4090 can handle this
-        gradient_accumulation = 8  # Effective batch = 64
+        # Single GPU: Balanced for RTX 4090 (24GB)
+        per_device_batch = 8  # Conservative utilization
+        gradient_accumulation = 4  # Effective batch = 32
         num_workers = 4
     else:
         # MPS or CPU: Conservative settings
         per_device_batch = 4
-        gradient_accumulation = 16  # Effective batch = 64
+        gradient_accumulation = 8  # Effective batch = 32
         num_workers = 2 if IS_WINDOWS else 4
 
     # Training arguments optimized for LoRA + prefix conditioning
@@ -707,16 +770,16 @@ def train(args):
         per_device_eval_batch_size=per_device_batch,
         gradient_accumulation_steps=gradient_accumulation,
         learning_rate=args.lora_lr,  # Base LR for LoRA parameters
-        weight_decay=0.01,  # As specified
+        weight_decay=0.01,
         adam_beta1=0.9,
         adam_beta2=0.999,
-        warmup_steps=500,  # As specified (500-1000 range)
-        lr_scheduler_type="cosine",  # Cosine decay as specified
+        warmup_steps=200,  # Reduced from 500 for faster convergence with smaller batches
+        lr_scheduler_type="cosine",  # Cosine decay
         eval_strategy="steps",
         eval_steps=args.eval_steps,
         save_strategy="steps",
         save_steps=args.save_steps,
-        save_total_limit=10,
+        save_total_limit=args.save_total_limit,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
@@ -741,6 +804,7 @@ def train(args):
     print(f"  Effective batch size: {per_device_batch * gradient_accumulation * num_gpus}")
     print(f"  Dataloader workers: {num_workers}")
     print(f"  FP16: {training_args.fp16}")
+    print(f"  Checkpoint retention: {args.save_total_limit} most recent")
     if is_multi_gpu:
         print(f"  Multi-GPU: {num_gpus} GPUs")
         print(f"  DDP backend: {training_args.ddp_backend or 'nccl'}")
@@ -781,6 +845,7 @@ def train(args):
         train_dataset=ds["train"],
         eval_dataset=ds["validation"],
         data_collator=partial(data_collator, tokenizer, args.max_length),
+        tokenizer=tokenizer,  # Pass tokenizer for CLIP generation
         optimizers=(optimizer, None),  # Custom optimizer, default scheduler
         callbacks=[
             EarlyStoppingCallback(early_stopping_patience=3),
@@ -792,7 +857,14 @@ def train(args):
         trainer.train(resume_from_checkpoint=last_checkpoint)
     else:
         trainer.train()
-    trainer.save_model(save_path)
+
+    # Unwrap DataParallel before saving to avoid "module." prefix in state dict
+    model_to_save = trainer.model
+    if isinstance(model_to_save, torch.nn.DataParallel):
+        model_to_save = model_to_save.module
+
+    # Save the unwrapped model
+    model_to_save.save_pretrained(save_path)
     tokenizer.save_pretrained(save_path)
 
     # Quantization temporarily disabled due to torch/optimum compatibility

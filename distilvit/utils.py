@@ -8,7 +8,8 @@ from transformers import (
 )
 
 
-MAX_LENGTH = 128
+# Default max length for captions - should match train.py DEFAULT_MAX_LENGTH
+MAX_LENGTH = 30
 
 
 class ImagePreprocessor:
@@ -18,15 +19,17 @@ class ImagePreprocessor:
         tokenizer,
         caption_column="captions",
         image_column="image",
+        max_length=None,
     ):
         self.feature_extractor = feature_extractor
         self.tokenizer = tokenizer
         self.caption_column = caption_column
         self.image_column = image_column
+        self.max_length = max_length or MAX_LENGTH
 
     def tokenize(self, captions):
         return self.tokenizer(
-            captions, padding="max_length", max_length=MAX_LENGTH
+            captions, padding="max_length", max_length=self.max_length
         ).input_ids
 
     def __call__(self, examples):
@@ -52,19 +55,29 @@ class DatasetTokenizer:
         image_column="image",
         image_preprocessor_cls=ImagePreprocessor,
         logfile="replacements.csv",
+        max_length=None,
     ):
         self.feature_extractor = AutoImageProcessor.from_pretrained(
             feature_extractor_model
         )
         self.tokenizer = AutoTokenizer.from_pretrained(text_decoder_model)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # Configure pad_token if not set (required for padding during tokenization)
+        if self.tokenizer.pad_token is None:
+            if self.tokenizer.eos_token is not None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            else:
+                self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+
         self.caption_column = caption_column
         self.image_column = image_column
+        self.max_length = max_length or MAX_LENGTH
         self.image_preprocessor = image_preprocessor_cls(
             self.feature_extractor,
             self.tokenizer,
             caption_column=self.caption_column,
             image_column=self.image_column,
+            max_length=self.max_length,
         )
         self.logfile = open(logfile, "a+")
 
