@@ -1,5 +1,5 @@
 """
-Tokenizes the Flickr30k dataset
+Tokenizes the Pexels dataset with GPT-4o captions
 """
 
 from distilvit.utils import DatasetTokenizer, cached_ds
@@ -10,7 +10,7 @@ def get_dataset(feature_extractor_model, text_decoder_model, args):
     from datasets import load_dataset
 
     split = f"train[:{args.sample}]" if args.sample else "train"
-    ds = load_dataset("tarekziade/pexels-gpt4o", split=split)
+    ds = load_dataset("Mozilla/pexels-gpt4o", split=split)
     # make alt_text a list
     ds = ds.map(lambda ex: {"alt_text": [ex["alt_text"]]})
 

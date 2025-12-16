@@ -7,12 +7,13 @@ param(
     [string]$Command = "help",
 
     # Training parameters
-    [string]$Dataset = "flickr",
+    [string]$Dataset = "flickr pexels",
     [int]$Epochs = 3,
     [string]$Sample = "",
     [int]$MaxLength = 30,
     [string]$Encoder = "google/siglip-base-patch16-224",
     [string]$Decoder = "HuggingFaceTB/SmolLM-135M",
+    [switch]$DeleteOldCheckpoints,
 
     # Upload parameters
     [string]$ModelId = "",
@@ -82,8 +83,8 @@ function Show-Help {
     Write-Host "  info              Show detailed project information"
     Write-Host ""
     Write-Host "Training parameters:" -ForegroundColor Green
-    Write-Host "  -Dataset NAME     Dataset to train on - default: flickr"
-    Write-Host "                    Options: flickr, coco, docornot, pexels, validation, all"
+    Write-Host "  -Dataset NAME     Dataset to train on - default: 'flickr pexels'"
+    Write-Host "                    Options: flickr, coco, docornot, pexels, validation"
     Write-Host "  -Epochs N         Number of training epochs - default: 3"
     Write-Host "  -Sample N         Sample size for quick testing - default: full dataset"
     Write-Host "  -MaxLength N      Maximum caption length - default: 30"
@@ -160,7 +161,8 @@ function Start-Training {
         [string]$SampleSize,
         [int]$Length,
         [string]$EncoderModel,
-        [string]$DecoderModel
+        [string]$DecoderModel,
+        [bool]$DeleteCheckpoints = $false
     )
 
     if (-not (Test-VirtualEnv)) {
@@ -189,6 +191,10 @@ function Start-Training {
 
     if ($SampleSize) {
         $args += "--sample", $SampleSize
+    }
+
+    if ($DeleteCheckpoints) {
+        $args += "--delete-old-checkpoints"
     }
 
     & $TRAIN @args
@@ -347,14 +353,14 @@ switch ($Command.ToLower()) {
     "install" { Install-Dependencies }
     "clean" { Clean-Build }
     "clean-all" { Clean-All }
-    "train" { Start-Training -DatasetName $Dataset -NumEpochs $Epochs -SampleSize $Sample -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder }
-    "train-quick" { Start-Training -DatasetName "validation" -NumEpochs 1 -SampleSize "100" -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder }
-    "train-modern" { Start-Training -DatasetName $Dataset -NumEpochs $Epochs -SampleSize $Sample -Length 30 -EncoderModel $Encoder -DecoderModel "HuggingFaceTB/SmolLM-360M" }
-    "train-large" { Start-Training -DatasetName $Dataset -NumEpochs $Epochs -SampleSize $Sample -Length 30 -EncoderModel "google/siglip-so400m-patch14-384" -DecoderModel "HuggingFaceTB/SmolLM-1.7B" }
-    "train-legacy" { Start-Training -DatasetName $Dataset -NumEpochs $Epochs -SampleSize $Sample -Length 128 -EncoderModel "google/vit-base-patch16-224" -DecoderModel "distilbert/distilgpt2" }
-    "train-flickr" { Start-Training -DatasetName "flickr" -NumEpochs $Epochs -SampleSize $Sample -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder }
-    "train-coco" { Start-Training -DatasetName "coco" -NumEpochs $Epochs -SampleSize $Sample -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder }
-    "train-multi" { Start-Training -DatasetName "flickr coco" -NumEpochs $Epochs -SampleSize $Sample -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder }
+    "train" { Start-Training -DatasetName $Dataset -NumEpochs $Epochs -SampleSize $Sample -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder -DeleteCheckpoints $DeleteOldCheckpoints }
+    "train-quick" { Start-Training -DatasetName "validation" -NumEpochs 1 -SampleSize "100" -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder -DeleteCheckpoints $DeleteOldCheckpoints }
+    "train-modern" { Start-Training -DatasetName $Dataset -NumEpochs $Epochs -SampleSize $Sample -Length 30 -EncoderModel $Encoder -DecoderModel "HuggingFaceTB/SmolLM-360M" -DeleteCheckpoints $DeleteOldCheckpoints }
+    "train-large" { Start-Training -DatasetName $Dataset -NumEpochs $Epochs -SampleSize $Sample -Length 30 -EncoderModel "google/siglip-so400m-patch14-384" -DecoderModel "HuggingFaceTB/SmolLM-1.7B" -DeleteCheckpoints $DeleteOldCheckpoints }
+    "train-legacy" { Start-Training -DatasetName $Dataset -NumEpochs $Epochs -SampleSize $Sample -Length 128 -EncoderModel "google/vit-base-patch16-224" -DecoderModel "distilbert/distilgpt2" -DeleteCheckpoints $DeleteOldCheckpoints }
+    "train-flickr" { Start-Training -DatasetName "flickr" -NumEpochs $Epochs -SampleSize $Sample -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder -DeleteCheckpoints $DeleteOldCheckpoints }
+    "train-coco" { Start-Training -DatasetName "coco" -NumEpochs $Epochs -SampleSize $Sample -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder -DeleteCheckpoints $DeleteOldCheckpoints }
+    "train-multi" { Start-Training -DatasetName "flickr coco" -NumEpochs $Epochs -SampleSize $Sample -Length $MaxLength -EncoderModel $Encoder -DecoderModel $Decoder -DeleteCheckpoints $DeleteOldCheckpoints }
     "test" { Start-Test }
     "quantize" { Start-Quantize }
     "upload-hub" { Start-Upload }
