@@ -181,8 +181,10 @@ function Start-Training {
     }
     Write-Host ""
 
-    $args = @(
-        "--dataset", $DatasetName,
+    # Build args array, splitting dataset names if multiple
+    $args = @("--dataset")
+    $args += $DatasetName -split '\s+'  # Split on whitespace
+    $args += @(
         "--num-train-epochs", $NumEpochs,
         "--encoder-model", $EncoderModel,
         "--decoder-model", $DecoderModel,
