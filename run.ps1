@@ -7,8 +7,8 @@ param(
     [string]$Command = "help",
 
     # Training parameters
-    [string]$Dataset = "flickr pexels",
-    [int]$Epochs = 3,
+    [string]$Dataset = "flickr pexels coco",
+    [int]$Epochs = 5,
     [string]$Sample = "",
     [int]$MaxLength = 30,
     [string]$Encoder = "google/siglip-base-patch16-224",
@@ -83,9 +83,9 @@ function Show-Help {
     Write-Host "  info              Show detailed project information"
     Write-Host ""
     Write-Host "Training parameters:" -ForegroundColor Green
-    Write-Host "  -Dataset NAME     Dataset to train on - default: 'flickr pexels'"
+    Write-Host "  -Dataset NAME     Dataset to train on - default: 'flickr pexels coco'"
     Write-Host "                    Options: flickr, coco, docornot, pexels, validation"
-    Write-Host "  -Epochs N         Number of training epochs - default: 3"
+    Write-Host "  -Epochs N         Number of training epochs - default: 5"
     Write-Host "  -Sample N         Sample size for quick testing - default: full dataset"
     Write-Host "  -MaxLength N      Maximum caption length - default: 30"
     Write-Host "  -Encoder MODEL    Vision encoder model - default: google/siglip-base-patch16-224"
