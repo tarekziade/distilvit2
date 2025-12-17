@@ -9,7 +9,7 @@ from distilvit.utils import DatasetTokenizer, cached_ds
 def get_dataset(feature_extractor_model, text_decoder_model, args):
     import os
     import glob
-    from datasets import Dataset, DatasetDict, concatenate_datasets
+    from datasets import Dataset, DatasetDict, concatenate_datasets, Features, Sequence, Value, Image
 
     # Load arrow files directly from cache to bypass schema validation issues
     cache_base = os.path.expanduser(
@@ -68,15 +68,40 @@ def get_dataset(feature_extractor_model, text_decoder_model, args):
 
     # Load arrow files directly
     try:
-        arrow_files = glob.glob(os.path.join(train_dir, "*.arrow"))
+        # Only load data-*.arrow files, not cache-*.arrow files
+        arrow_files = glob.glob(os.path.join(train_dir, "data-*.arrow"))
         if not arrow_files:
             raise FileNotFoundError("No arrow files found")
 
-        # Load from arrow files (all 115 files for full dataset)
+        # Load from arrow files (all arrow files for full dataset)
         datasets_list = []
         print(f"Loading {len(arrow_files)} arrow files...")
+
+        # Define target schema with alt_text as Sequence (list)
+        target_features = None
+
         for i, arrow_file in enumerate(sorted(arrow_files)):
             ds_part = Dataset.from_file(arrow_file)
+
+            # Normalize alt_text to list format before concatenating
+            # Some arrow files have it as string, others as list
+            if 'alt_text' in ds_part.column_names:
+                first_alt_text = ds_part[0]['alt_text']
+                if isinstance(first_alt_text, str):
+                    # Wrap string values in list
+                    ds_part = ds_part.map(lambda ex: {"alt_text": [ex["alt_text"]]}, batched=False)
+
+                    # Build target schema from the first file that needs conversion
+                    if target_features is None:
+                        target_features = ds_part.features.copy()
+                        target_features['alt_text'] = Sequence(Value('string'))
+
+                    # Cast to target schema
+                    ds_part = ds_part.cast(target_features)
+                elif target_features is None:
+                    # First file has correct schema already
+                    target_features = ds_part.features
+
             datasets_list.append(ds_part)
             if (i + 1) % 20 == 0:
                 print(f"  Loaded {i + 1}/{len(arrow_files)} files...")
@@ -84,9 +109,6 @@ def get_dataset(feature_extractor_model, text_decoder_model, args):
         ds = concatenate_datasets(datasets_list)
 
         print(f"[OK] Loaded {len(ds)} COCO examples from {len(datasets_list)} arrow files")
-
-        # Wrap alt_text as a list for consistency with other datasets
-        ds = ds.map(lambda ex: {"alt_text": [ex["alt_text"]]})
 
     except Exception as e:
         print(f"Warning: Could not load COCO arrow files: {e}")
