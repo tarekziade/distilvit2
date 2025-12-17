@@ -706,9 +706,23 @@ def train(args):
         )
 
     print("Datasets loaded", datasets)
+
+    # Filter to common columns needed for training before concatenating
+    # Required columns: image, alt_text, labels, pixel_values
+    required_columns = ['image', 'alt_text', 'labels', 'pixel_values']
+
+    filtered_datasets = []
+    for ds_dict in datasets:
+        filtered_dict = DatasetDict()
+        for split_name, split_ds in ds_dict.items():
+            # Keep only columns that exist in both required_columns and the dataset
+            columns_to_keep = [col for col in required_columns if col in split_ds.column_names]
+            filtered_dict[split_name] = split_ds.select_columns(columns_to_keep)
+        filtered_datasets.append(filtered_dict)
+
     combined = DatasetDict()
-    for split in datasets[0].keys():
-        combined[split] = concatenate_datasets([ds[split] for ds in datasets])
+    for split in filtered_datasets[0].keys():
+        combined[split] = concatenate_datasets([ds[split] for ds in filtered_datasets])
 
     ds = combined.shuffle(seed=THE_ANSWER_TO_LIFE_THE_UNIVERSE_AND_EVERYTHING)
 
