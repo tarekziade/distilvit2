@@ -7,6 +7,10 @@ from transformers import (
     AutoImageProcessor,
 )
 
+# Fix for large PNG iCCP chunks in COCO dataset
+from PIL import PngImagePlugin
+PngImagePlugin.MAX_TEXT_CHUNK = 10 * (1024**2)  # 10MB (default is 1MB)
+
 
 # Default max length for captions - should match train.py DEFAULT_MAX_LENGTH
 MAX_LENGTH = 30
