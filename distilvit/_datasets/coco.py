@@ -7,26 +7,75 @@ from distilvit.utils import DatasetTokenizer, cached_ds
 
 @cached_ds("coco")
 def get_dataset(feature_extractor_model, text_decoder_model, args):
-    from datasets import load_dataset
+    from datasets import Dataset, load_dataset
+    import pyarrow.parquet as pq
+    import os
 
-    split = f"train[:{args.sample}]" if args.sample else "train"
-    # Load dataset without specifying split to get all available splits
-    ds = load_dataset("Mozilla/coco-gpt4o")
+    # Path to the cached arrow files
+    cache_path = os.path.expanduser(
+        "~/.cache/huggingface/hub/datasets--Mozilla--coco-gpt4o/snapshots"
+    )
 
-    # Use train split if available, otherwise use the first available split
-    if "train" in ds:
-        ds = ds["train"]
+    # Find the snapshot directory
+    snapshot_dirs = []
+    if os.path.exists(cache_path):
+        for item in os.listdir(cache_path):
+            snapshot_dir = os.path.join(cache_path, item)
+            if os.path.isdir(snapshot_dir):
+                snapshot_dirs.append(snapshot_dir)
+
+    if not snapshot_dirs:
+        # Fallback to normal loading if cache not found
+        ds = load_dataset("Mozilla/coco-gpt4o")
+        if "train" in ds:
+            ds = ds["train"]
+        else:
+            ds = ds[list(ds.keys())[0]]
     else:
-        # Get first available split
-        ds = ds[list(ds.keys())[0]]
+        # Use the first (likely only) snapshot
+        snapshot_dir = snapshot_dirs[0]
+
+        # Look for train split arrow files
+        train_dir = os.path.join(snapshot_dir, "train")
+        if not os.path.exists(train_dir):
+            # Try other split names
+            for split_name in ["test", "validation"]:
+                split_dir = os.path.join(snapshot_dir, split_name)
+                if os.path.exists(split_dir):
+                    train_dir = split_dir
+                    break
+
+        # Load arrow files directly without schema validation
+        from datasets import load_from_disk
+        import pyarrow as pa
+
+        arrow_files = [os.path.join(train_dir, f) for f in os.listdir(train_dir) if f.endswith('.arrow')]
+
+        if arrow_files:
+            # Read first arrow file to get the actual schema
+            import pyarrow.ipc as ipc
+            with pa.memory_map(arrow_files[0], 'r') as source:
+                reader = ipc.open_file(source)
+                table = reader.read_all()
+
+            # Concatenate all tables
+            tables = [table]
+            for arrow_file in arrow_files[1:]:
+                with pa.memory_map(arrow_file, 'r') as source:
+                    reader = ipc.open_file(source)
+                    tables.append(reader.read_all())
+
+            full_table = pa.concat_tables(tables)
+            ds = Dataset(full_table)
+        else:
+            # Fallback
+            ds = load_dataset("Mozilla/coco-gpt4o", split="train")
 
     # Sample if requested
     if args.sample:
         ds = ds.select(range(min(args.sample, len(ds))))
 
     # alt_text is already a list in this dataset, no need to wrap it again
-    # Just ensure it's in the right format for DatasetTokenizer
-
     ds_tokenizer = DatasetTokenizer(
         feature_extractor_model,
         text_decoder_model,
