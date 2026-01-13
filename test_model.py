@@ -1,58 +1,68 @@
 """
-Quick test script to verify trained model works
+Quick test script to verify trained model works.
+
+This script loads the complete model from a single model.safetensors file,
+which contains:
+- Vision encoder weights (SigLIP)
+- Language model base weights (SmolLM)
+- LoRA adapter weights (lora_A/lora_B matrices)
+- Projection layer weights
+
+No pretrained weights are downloaded from HuggingFace.
 """
+
 import torch
 from transformers import AutoTokenizer, AutoImageProcessor
 from distilvit.prefix_model import PrefixConditioningVLM
 from PIL import Image
-import requests
-from io import BytesIO
 
 # Model path - using the newly trained model with all fixes
-model_path = "D:/github/distilvit2/siglip-base-patch16-224-SmolLM-135M-lora"
+# model_path = "D:/github/distilvit2/siglip-base-patch16-224-SmolLM-135M-lora"
+model_path = "/Volumes/Shared/siglip-base-patch16-224-SmolLM-135M-merged/"
 
 print("Loading model...")
 try:
     # Load tokenizer from saved model
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    # Load image processor from original encoder (not saved with model)
-    encoder_model_name = "google/siglip-base-patch16-224"
-    decoder_model_name = "HuggingFaceTB/SmolLM-135M"
+    # Load image processor - we need to know which encoder was used
+    # Get this from config
+    from distilvit.prefix_model import PrefixConditioningConfig
+    config = PrefixConditioningConfig.from_pretrained(model_path)
+    encoder_model_name = config.vision_config.get("_name_or_path", "google/siglip-base-patch16-224")
     image_processor = AutoImageProcessor.from_pretrained(encoder_model_name)
 
-    # Load encoder and decoder
-    print("Loading encoder and decoder...")
-    from transformers import SiglipVisionModel, AutoModelForCausalLM
-    from distilvit.prefix_model import PrefixConditioningConfig
+    # Initialize model architecture with random weights (will be overwritten)
+    print("Initializing model architecture...")
+    from transformers import SiglipVisionModel, AutoModelForCausalLM, SiglipVisionConfig
+    from transformers import LlamaConfig
 
-    vision_encoder = SiglipVisionModel.from_pretrained(encoder_model_name)
-    language_model = AutoModelForCausalLM.from_pretrained(decoder_model_name)
+    # Create empty models from config (no pretrained weights download)
+    vision_config = SiglipVisionConfig(**config.vision_config)
+    vision_encoder = SiglipVisionModel(vision_config)
 
-    # Create config
-    config = PrefixConditioningConfig.from_pretrained(model_path)
+    text_config = LlamaConfig(**config.text_config)
+    language_model = AutoModelForCausalLM.from_config(text_config)
 
-    # Initialize model with encoder/decoder
+    # Initialize full model
     model = PrefixConditioningVLM(
-        config=config,
-        vision_encoder=vision_encoder,
-        language_model=language_model
+        config=config, vision_encoder=vision_encoder, language_model=language_model
     )
 
-    # Set tokenizer (set externally after init)
+    # Set tokenizer
     model.tokenizer = tokenizer
 
-    # Load trained weights
-    print("Loading trained weights...")
+    # Load all trained weights from single file
+    print("Loading all weights from model.safetensors...")
     from safetensors.torch import load_file
     import os
+
     weights_path = os.path.join(model_path, "model.safetensors")
     state_dict = load_file(weights_path)
 
     # Remove 'module.' prefix from keys if present (added by DataParallel during training)
-    # Only strip if keys actually have the prefix (for backward compatibility)
-    if any(k.startswith('module.') for k in state_dict.keys()):
-        state_dict = {k.replace('module.', '', 1): v for k, v in state_dict.items()}
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
 
     load_result = model.load_state_dict(state_dict, strict=False)
     print(f"Missing keys: {len(load_result.missing_keys)}")
@@ -68,54 +78,51 @@ try:
     model = model.to(device)
     print(f"[OK] Model loaded successfully on {device}")
 
-    # Test with a sample image (using a URL or local file)
-    print("\nTesting inference...")
+    # Load Mozilla/alt-text-validation dataset
+    print("\nLoading Mozilla/alt-text-validation dataset...")
+    from datasets import load_dataset
 
-    # Try to use an image from the internet (small test image)
-    image_url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/ai2d-demo.jpg"
+    dataset = load_dataset("Mozilla/alt-text-validation", split="train")
+    print(f"[OK] Loaded dataset with {len(dataset)} images")
 
-    try:
-        response = requests.get(image_url, timeout=10)
-        image = Image.open(BytesIO(response.content)).convert("RGB")
-        print("[OK] Loaded test image from URL")
-    except Exception as e:
-        print(f"Could not load image from URL: {e}")
-        print("Creating a blank test image instead")
-        image = Image.new("RGB", (224, 224), color=(128, 128, 128))
+    # Test on 10 images
+    num_images = min(10, len(dataset))
+    print(f"\nTesting on {num_images} images...\n")
+    print("=" * 80)
 
-    # Process image
-    pixel_values = image_processor(images=image, return_tensors="pt").pixel_values
-    pixel_values = pixel_values.to(device)
+    for i in range(num_images):
+        example = dataset[i]
+        image = example['image'].convert("RGB")
+        reference_alt_text = example['gpt_alt_text']
 
-    # Generate caption
-    print("Generating caption...")
-    with torch.no_grad():
-        generated_ids = model.generate(
-            pixel_values=pixel_values,
-            max_length=30,
-            num_beams=3,
-            repetition_penalty=1.2,  # Penalize repetition
-            no_repeat_ngram_size=3,  # Don't repeat 3-grams
-            early_stopping=True,
-        )
+        # Process image
+        pixel_values = image_processor(images=image, return_tensors="pt").pixel_values
+        pixel_values = pixel_values.to(device)
 
-    print(f"Generated token IDs shape: {generated_ids.shape}")
-    print(f"Generated token IDs: {generated_ids[0].tolist()}")
+        # Generate caption
+        with torch.no_grad():
+            generated_ids = model.generate(
+                pixel_values=pixel_values,
+                max_length=30,
+                num_beams=3,
+                repetition_penalty=1.2,
+                no_repeat_ngram_size=3,
+                early_stopping=True,
+            )
 
-    # Decode
-    caption = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-    caption_with_special = tokenizer.decode(generated_ids[0], skip_special_tokens=False)
+        # Decode
+        generated_caption = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
-    print("\n" + "="*60)
-    print("GENERATED CAPTION (without special tokens):")
-    print(repr(caption))
-    print("\nGENERATED CAPTION (with special tokens):")
-    print(repr(caption_with_special))
-    print("="*60)
+        # Display results
+        print(f"\n[Image {i+1}/{num_images}]")
+        print(f"Reference (GPT):  {reference_alt_text}")
+        print(f"Generated:        {generated_caption}")
+        print("-" * 80)
 
     print("\n[OK] Model test completed successfully!")
 
 except Exception as e:
     print(f"\n[ERROR] Error testing model: {e}")
     import traceback
+
     traceback.print_exc()

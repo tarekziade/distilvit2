@@ -28,4 +28,5 @@ bert-score  # For dataset quality analysis
 # for the converter (updated for Python 3.13 compatibility)
 onnxruntime>=1.20.0
 optimum>=1.21.0,<2.0.0
-onnx>=1.16.0
+onnx>=1.16.0,<1.20  # Pin to <1.20 for ONNXRuntime quantization compatibility
+onnxscript>=0.5.0  # Required by torch.onnx.export
