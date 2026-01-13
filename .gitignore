@@ -182,3 +182,4 @@ onnx_export/
 # Temporary files
 replacements.csv
 *.output
+.DS_Store

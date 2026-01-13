@@ -16,6 +16,8 @@ BIN := $(VENV)/bin
 PYTHON_VENV := $(BIN)/python
 PIP := $(BIN)/pip
 TRAIN := $(BIN)/train
+MERGE_DATASETS ?= coco flickr pexels docornot validation
+MERGE_SAVE ?= merged_dataset
 
 # Training defaults
 DATASET ?= flickr
@@ -159,6 +161,15 @@ train-coco: ## Train on COCO dataset
 train-multi: ## Train on multiple datasets (Flickr + COCO)
 	$(MAKE) train DATASET='flickr coco'
 
+merge-datasets: $(PYTHON_VENV) ## Merge training datasets into a unified HF-ready dataset
+	@echo "Merging datasets: $(MERGE_DATASETS)"
+	$(PYTHON_VENV) distilvit/merge_datasets.py \
+		--datasets $(MERGE_DATASETS) \
+		$(if $(SAMPLE),--sample $(SAMPLE),) \
+		--save-path $(MERGE_SAVE) \
+		$(if $(PUSH_TO_HUB),--push-to-hub $(PUSH_TO_HUB),) \
+		$(if $(PRIVATE),--private,)
+
 test: $(PYTHON_VENV) ## Run inference test comparing models
 	@echo "Running inference test..."
 	$(PYTHON_VENV) distilvit/infere.py
@@ -173,6 +184,15 @@ quality-report: $(PYTHON_VENV) ## Generate dataset quality report (QUALITY_DATAS
 
 quality-report-quick: $(PYTHON_VENV) ## Quick quality report (100 samples)
 	$(MAKE) quality-report MAX_SAMPLES=100
+
+generate-prompts: $(PYTHON_VENV) ## Generate synthetic image prompts from rare objects
+	@echo "Generating synthetic prompts for rare objects..."
+	$(PYTHON_VENV) distilvit/generate_synthetic_prompts.py \
+		--rare-objects $(or $(RARE_OBJECTS),quality_reports/objects_below_50.csv) \
+		--output $(or $(PROMPTS_OUTPUT),synthetic_prompts.jsonl) \
+		--prompts-per-object $(or $(PROMPTS_PER_OBJ),5) \
+		$(if $(MAX_COUNT),--max-count $(MAX_COUNT),) \
+		--include-combinations
 
 quantize: $(PYTHON_VENV) ## Quantize a trained model (requires MODEL_PATH)
 ifndef MODEL_PATH
