@@ -21,7 +21,13 @@
       "Bash(powershell -ExecutionPolicy Bypass -File ./train-multigpu.ps1)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git pull:*)"
+      "Bash(git pull:*)",
+      "Bash(bin/python:*)",
+      "Bash(bin/pip install:*)",
+      "Bash(bin/pip show:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(python3:*)",
+      "Bash(source bin/activate)"
     ]
   }
 }
